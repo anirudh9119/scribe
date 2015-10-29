@@ -8,6 +8,8 @@ import tarfile
 from lxml import etree
 
 from fuel.datasets.hdf5 import H5PYDataset
+import re
+import collections
 
 data_path = os.environ['FUEL_DATA_PATH']
 data_path = os.path.join(data_path,'handwriting/')
@@ -39,8 +41,8 @@ features.dims.create_scale(
     features_shape_labels, 'shape_labels')
 features.dims[0].attach_scale(features_shape_labels)
 
-
 transcript_files = []
+strokes = []
 idx = 0
 for member in raw_data.getmembers():
     if member.isreg():
@@ -64,23 +66,27 @@ for member in raw_data.getmembers():
         pen_up[change_stroke]=1
         pen_up[-1] = 1
         points[:,0] = pen_up
-        features[idx] = points.flatten()
+        #features[idx] = points.flatten()
         features_shapes[idx] = np.array(points.shape)
+        strokes.append(points)
         idx += 1
 
+strokes = [x[1:] - x[:-1] for x in strokes]
+strokes = [np.vstack([[0,0,0], x]) for x in strokes]
+
+all_strokes = np.vstack(strokes)
+data_mean = all_strokes.mean(axis=0)
+data_std = all_strokes.std(axis=0)
+data_mean[0] = 0
+data_std[0] = 1
+strokes = [ x/data_std for x in strokes ]
+
+features[...] = strokes
+
 features.dims[0].label = 'batch'
-
-#print len(all_results)
-
-
-#train_set = H5PYDataset(hdf5_path, which_sets=('all',), sources=('features',))
-
 transcript_files = [x.split("/")[-1] for x in transcript_files]
-
-import re
 transcript_files = [re.sub('-[0-9][0-9].xml','.txt',x) for x in transcript_files]
 
-import collections
 counter=collections.Counter(transcript_files)
 
 #######################
@@ -88,11 +94,6 @@ counter=collections.Counter(transcript_files)
 #######################
 
 input_file = os.path.join(data_path,'ascii-all.tar.gz')
-
-file_name = "handwriting.hdf5"
-#hdf5_path = os.path.join(data_path, file_name)
-
-#h5file = h5py.File(hdf5_path, mode='w')
 
 raw_data = tarfile.open(input_file)
 num_files = sum([x.isreg() for x in raw_data.getmembers()])
@@ -164,5 +165,8 @@ split_dict = {
 
 h5file.attrs['split'] = H5PYDataset.create_split_array(split_dict)
 
+ipdb.set_trace()
+
 h5file.flush()
 h5file.close()
+
