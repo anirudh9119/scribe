@@ -10,7 +10,7 @@ class Write(SimpleExtension):
     ----------
     steps : int Number of points to generate
     """
-    def __init__(self, generator, steps=1000, n_samples = 5, 
+    def __init__(self, generator, steps=1000, n_samples = 2, 
             save_name = "sample_scribe.png", **kwargs):
         super(Write, self).__init__(**kwargs)
         emit = generator.generate(

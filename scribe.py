@@ -1,5 +1,6 @@
 import ipdb
 
+import os
 import numpy
 from numpy import array
 
@@ -17,7 +18,8 @@ from blocks.bricks.recurrent import LSTM, RecurrentStack
 from blocks.bricks.sequence_generators import (
     SequenceGenerator, Readout, AbstractEmitter)
 
-from blocks.extensions import FinishAfter, Printing, SimpleExtension
+from blocks.extensions import (FinishAfter, Printing,
+                        SimpleExtension, Timing, ProgressBar)
 
 from blocks.extensions.monitoring import (TrainingDataMonitoring,
                                     DataStreamMonitoring)
@@ -75,6 +77,12 @@ class SketchEmitter(AbstractEmitter, Initializable, Random):
         weight = T.nnet.softmax(weight)
         penup = T.nnet.sigmoid(penup)
 
+        mean.name = "mean"
+        sigma.name = "sigma"
+        corr.name = "corr"
+        weight.name = "weight"
+        penup.name = "penup"
+
         return mean, sigma, corr, weight, penup
 
     @application
@@ -127,7 +135,7 @@ class SketchEmitter(AbstractEmitter, Initializable, Random):
         nll = -T.log((n * weight).sum(axis=-1, keepdims=True) + self.epsilon)
         nll -= nmax
         # Change this 100!!!!
-        nll += 100*T.nnet.binary_crossentropy(penup, outputs[:,:1])
+        nll += T.nnet.binary_crossentropy(penup, outputs[:,:1])
 
         return nll.reshape(nll_shape, ndim=nll_ndim)
 
@@ -148,22 +156,22 @@ class SketchEmitter(AbstractEmitter, Initializable, Random):
 # Define parameters of the model
 ###################
 
-batch_size = 10 #64 for tpbtt
+save_dir = os.environ['RESULTS_DIR']
+save_dir = os.path.join(save_dir,'handwriting/')
+
+exp_name = 'scribe_1'
+
+batch_size = 64
 frame_size = 3
 k = 20
 target_size = frame_size * k
 
-depth_x = 2
-hidden_size_mlp_x = 20
-
-depth_theta = 2
-hidden_size_mlp_theta = 20
-hidden_size_recurrent = 20
+hidden_size_recurrent = 400
 readout_size =6*k+1
 
 lr = 3e-4
 
-dataset = Handwriting(('all',))
+dataset = Handwriting(('train',))
 data_stream = DataStream.default_stream(
             dataset, iteration_scheme=SequentialScheme(
             dataset.num_examples, batch_size))
@@ -172,6 +180,16 @@ data_stream = FilterSources(data_stream,
 data_stream = Padding(data_stream)
 data_stream = Mapping(data_stream, _transpose)
 data_stream = ForceFloatX(data_stream)
+
+dataset = Handwriting(('valid',))
+valid_stream = DataStream.default_stream(
+            dataset, iteration_scheme=SequentialScheme(
+            dataset.num_examples, 10*batch_size))
+valid_stream = FilterSources(valid_stream, 
+                          sources = ('features',))
+valid_stream = Padding(valid_stream)
+valid_stream = Mapping(valid_stream, _transpose)
+valid_stream = ForceFloatX(valid_stream)
 
 x_tr = next(data_stream.get_epoch_iterator())
 
@@ -198,25 +216,65 @@ generator = SequenceGenerator(readout=readout,
                               name = "generator")
 
 generator.weights_init = IsotropicGaussian(0.01)
-generator.biases_init = Constant(0.)
+generator.biases_init = Constant(0.001)
 generator.push_initialization_config()
 
-generator.transition.biases_init = IsotropicGaussian(0.01,1)
+generator.transition.biases_init = IsotropicGaussian(0.01,0.9)
 generator.transition.push_initialization_config()
 generator.initialize()
 
 cost_matrix = generator.cost_matrix(x, x_mask)
 cost = cost_matrix.sum()/x_mask.sum()
-cost.name = "sequence_log_likelihood"
+cost.name = "nll"
 
 cg = ComputationGraph(cost)
 model = Model(cost)
 
+from blocks.roles import WEIGHT
+from blocks.filter import VariableFilter
+#ipdb.set_trace()
+
+readouts = VariableFilter( applications = [generator.readout.readout],
+    name_regex = "output")(cg.variables)[0]
+
+mean, sigma, corr, weight, penup = emitter.components(readouts)
+
+cost_reg = cost
+for weight in VariableFilter( roles = [WEIGHT])(cg.variables):
+    cost_reg += 0.01*(weight**2).sum()
+
+#ipdb.set_trace()
+cost_reg += 0.01*sigma.mean() #+ 0.0001*(mean**2).mean()
+cost_reg += 0.01*(penup**2).mean()
+cost_reg.name = "reg_cost"
+
 emit = generator.generate(
-  n_steps = 10,
+  n_steps = 400,
   batch_size = 8,
   iterate = True
   )[-2]
+
+cg = ComputationGraph(cost_reg)
+model = Model(cost_reg)
+
+min_sigma = sigma.min(axis=(0,1)).copy(name="sigma_min")
+mean_sigma = sigma.mean(axis=(0,1)).copy(name="sigma_mean")
+max_sigma = sigma.max(axis=(0,1)).copy(name="sigma_max")
+
+min_mean = mean.min(axis=(0,1)).copy(name="mu_min")
+mean_mean = mean.mean(axis=(0,1)).copy(name="mu_mean")
+max_mean = mean.max(axis=(0,1)).copy(name="mu_max")
+
+min_corr = corr.min().copy(name="corr_min")
+mean_corr = corr.mean().copy(name="corr_mean")
+max_corr = corr.max().copy(name="corr_max")
+
+mean_data = x.mean(axis=(0,1)).copy(name="data_mean")
+sigma_data = x.std(axis=(0,1)).copy(name="data_std")
+max_data = x.max(axis=(0,1)).copy(name="data_max")
+min_data = x.min(axis=(0,1)).copy(name="data_min")
+
+mean_penup = penup.mean().copy(name="penup_mean")
 
 #ipdb.set_trace()
 
@@ -227,19 +285,49 @@ emit_fn()
 parameters = cg.parameters
 
 algorithm = GradientDescent(
-    cost=cost, parameters=parameters,
-    step_rule=CompositeRule([StepClipping(10.0), Adam(0.005)]))
+    cost=cost_reg, parameters=parameters,
+    step_rule=CompositeRule([StepClipping(10.), Adam(0.007)]))
+
+variables = [cost, min_sigma, max_sigma,
+    min_mean, max_mean, mean_mean, mean_sigma, mean_corr,
+    mean_data, sigma_data, min_corr, max_corr, cost_reg,
+    max_data, min_data, mean_penup]
 
 train_monitor = TrainingDataMonitoring(
-    variables=[cost],
+    variables=variables,
     every_n_batches = 10,
     prefix="train")
 
+valid_monitor = DataStreamMonitoring(
+     variables,
+     valid_stream,
+     after_epoch = True,
+     every_n_batches = 150,
+     prefix="valid")
+
+from blocks.extensions.saveload import Checkpoint
+from play.extensions import SaveComputationGraph, Flush
+from play.extensions.plot import Plot
+
+#def _is_nan(log):
+#    return any(v != v for v in log.current_row.itervalues())
+
 extensions = extensions=[
     train_monitor,
+    valid_monitor,
+    Timing(every_n_batches = 10),
     Printing(every_n_batches = 10),
-    Write(generator,every_n_batches = 50),
-    FinishAfter(after_n_batches = 100)
+    Write(generator, every_n_batches = 50,
+        save_name = save_dir + "samples/" + exp_name + ".png"),
+    FinishAfter(),
+    # .add_condition(["after_batch"], _is_nan),
+    ProgressBar(),
+    Checkpoint(save_dir + exp_name + ".pkl",after_epoch = True),
+    SaveComputationGraph(emit),
+    Plot(save_dir + "pkl/" + exp_name + ".png",
+     [['train_nll',
+       'valid_nll']],
+     every_n_batches = 100)
     ]
 
 main_loop = MainLoop(

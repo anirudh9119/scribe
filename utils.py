@@ -3,11 +3,20 @@ matplotlib.use('Agg')
 from matplotlib import pyplot
 import numpy as np
 import ipdb
+import os
+
+data_path = os.environ['FUEL_DATA_PATH']
+data_path = os.path.join(data_path,'handwriting/')
+std_values = np.load(os.path.join(data_path,'handwriting_std.npz'))
+data_mean = std_values['data_mean']
+data_std = std_values['data_std']
 
 def plot_single(X, ax=None):
     # Plot a single example.
     if ax is None:
         f, ax = pyplot.subplots()
+
+    X = data_std*X + data_mean
 
     x = np.cumsum(X[:,1])
     y = np.cumsum(X[:,2])
@@ -18,7 +27,7 @@ def plot_single(X, ax=None):
         ax.plot(x[start:cut_value], y[start:cut_value],
                  'k-', linewidth=1.5)
         start = cut_value+1
-    #ax.axis('equal')
+    ax.axis('equal')
     #ax.axes.get_xaxis().set_visible(False)
     #ax.axes.get_yaxis().set_visible(False)
 
@@ -47,7 +56,7 @@ if __name__ == '__main__':
     char2code = {v: k for k, v in code2char.items()}
     unk_char = '<UNK>'
 
-    train = Handwriting(('all',))
+    train = Handwriting(('train',))
     handle = train.open()
 
     x_tr = train.get_data(handle, slice(0,7))
@@ -58,5 +67,5 @@ if __name__ == '__main__':
     for transcript in TRANSCRIPTS:
         print "".join([code2char[x] for x in transcript])
 
-    plot_H(X, save_name = 'test.png')
+    plot_hw(X, save_name = 'test.png')
 
