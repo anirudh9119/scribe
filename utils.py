@@ -44,6 +44,8 @@ def plot_hw(X, save_name=None):
     else:
         pyplot.savefig(save_name)
 
+    pyplot.close()
+
 if __name__ == '__main__':
 
     from datasets.handwriting import Handwriting
