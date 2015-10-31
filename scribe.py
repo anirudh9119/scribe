@@ -14,7 +14,7 @@ from blocks.bricks import (Tanh, MLP, Initializable,
                         Rectifier, Activation, Identity)
 from blocks.bricks.base import application
 
-from blocks.bricks.recurrent import LSTM, RecurrentStack
+from blocks.bricks.recurrent import GatedRecurrent, RecurrentStack
 from blocks.bricks.sequence_generators import (
     SequenceGenerator, Readout, AbstractEmitter)
 
@@ -26,6 +26,7 @@ from blocks.extensions.monitoring import (TrainingDataMonitoring,
 
 from blocks.graph import ComputationGraph
 from blocks.initialization import IsotropicGaussian, Constant
+from blocks import initialization
 from blocks.main_loop import MainLoop
 from blocks.model import Model
 from blocks.monitoring import aggregation
@@ -44,11 +45,11 @@ def _transpose(data):
 
 import numpy as np
 from theano import tensor as T
+from play.utils import BivariateGMM
+from cle.cle.utils import predict
 
-class SketchEmitter(AbstractEmitter, Initializable, Random):
+class BivariateGMMEmitter(AbstractEmitter, Initializable, Random):
     """A mixture of gaussians emitter for x,y and logistic for pen-up/down.
-
-    Code from udibr.
     Parameters
     ----------
     k : number of components
@@ -56,16 +57,16 @@ class SketchEmitter(AbstractEmitter, Initializable, Random):
     def __init__(self, k=20, epsilon=1e-5, **kwargs):
         self.k = k
         self.epsilon = epsilon
-        super(SketchEmitter, self).__init__(**kwargs)
+        super(BivariateGMMEmitter, self).__init__(**kwargs)
 
     def components(self, readouts):
         "Extract parameters of the distribution."
         k = self.k
-        output_norm = 2*k
         readouts = readouts.reshape((-1, self.get_dim('inputs')))
 
-        mean = readouts[:, 0:2*k].reshape((-1,k,2))
-        sigma = readouts[:, 2*k:4*k].reshape((-1,k,2))
+        #Reshaped
+        mean = readouts[:, 0:2*k].reshape((-1,2,k))
+        sigma = readouts[:, 2*k:4*k].reshape((-1,2,k))
         corr = readouts[:, 4*k:5*k]
         weight = readouts[:, 5*k:6*k]
         penup = readouts[:, 6*k:]
@@ -77,10 +78,10 @@ class SketchEmitter(AbstractEmitter, Initializable, Random):
         weight = T.nnet.softmax(weight)
         penup = T.nnet.sigmoid(penup)
 
-        mean.name = "mean"
+        mean.name = "mu"
         sigma.name = "sigma"
         corr.name = "corr"
-        weight.name = "weight"
+        weight.name = "coeff"
         penup.name = "penup"
 
         return mean, sigma, corr, weight, penup
@@ -88,56 +89,43 @@ class SketchEmitter(AbstractEmitter, Initializable, Random):
     @application
     def emit(self, readouts):
         """Sample from the distribution.
-
         """
-        mean, sigma, corr, weight, penup = self.components(readouts)
-        k = self.k
-        batch_size = readouts.shape[0]
+        mu, sigma, corr, coeff, penup = self.components(readouts)
+        
+        idx = predict(
+            self.theano_rng.multinomial(
+                pvals=coeff,
+                dtype=coeff.dtype
+            ), axis=1)
+        mu = mu[T.arange(mu.shape[0]), :, idx]
+        sigma = sigma[T.arange(sigma.shape[0]), :, idx]
+        corr = corr[T.arange(corr.shape[0]), idx]
+        
+        mu_x = mu[:,0]
+        mu_y = mu[:,1]
+        sigma_x = sigma[:,0]
+        sigma_y = sigma[:,1]
+     
+        z = self.theano_rng.normal(size=mu.shape,
+                                         avg=0., std=1.,
+                                         dtype=mu.dtype)
 
-        nr = self.theano_rng.normal(
-            size=(batch_size, k, 2),
-            avg=0., std=1.)
-
-        c = (1 - T.sqrt(1-corr**2))/(corr + self.epsilon)
-        c = c.dimshuffle((0, 1, 'x'))
-        nr = nr + nr[:,:,::-1]*c
-
-        nr = nr / T.sqrt(1+c**2)
-        nr = nr * sigma
-        nr = nr + mean
-
-        weight = self.theano_rng.multinomial(pvals=weight, dtype=floatX)
-        xy = nr * weight[:,:,None]
-        xy = xy.sum(axis=1)
-        un = self.theano_rng.uniform(size=(batch_size, 1))
+        un = self.theano_rng.uniform(size=penup.shape)
         penup = T.cast(un < penup, floatX)
-        res = T.concatenate([penup, xy], axis=1)
 
-        return res
+        s_x = (mu_x + sigma_x * z[:,0]).dimshuffle(0,'x')
+        s_y = mu_y + sigma_y * ( (z[:,0] * corr) + (z[:,1] * T.sqrt(1.-corr**2)))
+        s_y = s_y.dimshuffle(0,'x')
+        s = T.concatenate([penup,s_x,s_y], axis = 1)
+
+        return s
 
     @application
     def cost(self, readouts, outputs):
         """ Bivariate Gaussian NLL
         """
-        nll_ndim = readouts.ndim - 1
-        nll_shape = readouts.shape[:-1]
-        outputs = outputs.reshape((-1,3))
-        mean, sigma, corr, weight, penup = self.components(readouts)
-        d = outputs[:,1:].dimshuffle((0, 'x', 1)) - mean
-        sigma2 = sigma[:,:,0] * sigma[:,:,1] + self.epsilon
-        z = d ** 2 / sigma ** 2
-        z = z.sum(axis=-1) - 2 * corr * (d[:,:,0] * d[:,:,1]) / sigma2
-        corr1 = 1 - corr ** 2 + self.epsilon
-        n = - z / (2 * corr1)
-        nmax = n.max(axis=-1, keepdims=True)
-        n = n - nmax
-        n = T.exp(n) / (2*np.pi*sigma2*T.sqrt(corr1))
-        nll = -T.log((n * weight).sum(axis=-1, keepdims=True) + self.epsilon)
-        nll -= nmax
-        # Change this 100!!!!
-        nll += T.nnet.binary_crossentropy(penup, outputs[:,:1])
-
-        return nll.reshape(nll_shape, ndim=nll_ndim)
+        mu, sigma, corr, coeff, penup = emitter.components(readouts)
+        return BivariateGMM(outputs, mu, sigma, corr, coeff, penup)
 
     @application
     def initial_outputs(self, batch_size):
@@ -150,7 +138,8 @@ class SketchEmitter(AbstractEmitter, Initializable, Random):
         if name == 'outputs':
             return 3
 
-        return super(SketchEmitter, self).get_dim(name)
+        return super(BivariateGMMEmitter, self).get_dim(name)
+
 
 ###################
 # Define parameters of the model
@@ -161,7 +150,7 @@ save_dir = os.path.join(save_dir,'handwriting/')
 
 exp_name = 'scribe_1'
 
-batch_size = 64
+batch_size = 20
 frame_size = 3
 k = 20
 target_size = frame_size * k
@@ -196,13 +185,13 @@ x_tr = next(data_stream.get_epoch_iterator())
 x = tensor.tensor3('features')
 x_mask = tensor.matrix('features_mask')
 
-transition = [LSTM(dim=hidden_size_recurrent, 
-                   name = "lstm_{}".format(i) ) for i in range(3)]
+transition = [GatedRecurrent(dim=hidden_size_recurrent, 
+                   name = "gru_{}".format(i) ) for i in range(3)]
 
 transition = RecurrentStack( transition,
             name="transition", skip_connections = True)
 
-emitter = SketchEmitter(k = k)
+emitter = BivariateGMMEmitter(k = k)
 
 source_names = [name for name in transition.apply.states if 'states' in name]
 readout = Readout(
@@ -219,12 +208,14 @@ generator.weights_init = IsotropicGaussian(0.01)
 generator.biases_init = Constant(0.001)
 generator.push_initialization_config()
 
-generator.transition.biases_init = IsotropicGaussian(0.01,0.9)
+
+#generator.transition.weights_init = initialization.Identity(0.98)
+#generator.transition.biases_init = IsotropicGaussian(0.01,0.9)
 generator.transition.push_initialization_config()
 generator.initialize()
 
 cost_matrix = generator.cost_matrix(x, x_mask)
-cost = cost_matrix.sum()/x_mask.sum()
+cost = cost_matrix.sum(axis = 0).mean()
 cost.name = "nll"
 
 cg = ComputationGraph(cost)
@@ -232,20 +223,23 @@ model = Model(cost)
 
 from blocks.roles import WEIGHT
 from blocks.filter import VariableFilter
-#ipdb.set_trace()
+transition_matrix = VariableFilter(
+            theano_name_regex = "state_to_state")(cg.parameters)
+for matr in transition_matrix:
+    matr.set_value(0.98*np.eye(hidden_size_recurrent, dtype = floatX))
 
 readouts = VariableFilter( applications = [generator.readout.readout],
     name_regex = "output")(cg.variables)[0]
 
 mean, sigma, corr, weight, penup = emitter.components(readouts)
 
-cost_reg = cost
-for weight in VariableFilter( roles = [WEIGHT])(cg.variables):
-    cost_reg += 0.01*(weight**2).sum()
+cost_reg = cost + 0
+#for weight in VariableFilter( roles = [WEIGHT])(cg.variables):
+#    cost_reg += 0.01*(weight**2).sum()
 
 #ipdb.set_trace()
-cost_reg += 0.01*sigma.mean() #+ 0.0001*(mean**2).mean()
-cost_reg += 0.01*(penup**2).mean()
+#cost_reg += 0.01*sigma.mean() #+ 0.0001*(mean**2).mean()
+#cost_reg += 0.01*(penup**2).mean()
 cost_reg.name = "reg_cost"
 
 emit = generator.generate(
@@ -257,13 +251,13 @@ emit = generator.generate(
 cg = ComputationGraph(cost_reg)
 model = Model(cost_reg)
 
-min_sigma = sigma.min(axis=(0,1)).copy(name="sigma_min")
-mean_sigma = sigma.mean(axis=(0,1)).copy(name="sigma_mean")
-max_sigma = sigma.max(axis=(0,1)).copy(name="sigma_max")
+min_sigma = sigma.min(axis=(0,2)).copy(name="sigma_min")
+mean_sigma = sigma.mean(axis=(0,2)).copy(name="sigma_mean")
+max_sigma = sigma.max(axis=(0,2)).copy(name="sigma_max")
 
-min_mean = mean.min(axis=(0,1)).copy(name="mu_min")
-mean_mean = mean.mean(axis=(0,1)).copy(name="mu_mean")
-max_mean = mean.max(axis=(0,1)).copy(name="mu_max")
+min_mean = mean.min(axis=(0,2)).copy(name="mu_min")
+mean_mean = mean.mean(axis=(0,2)).copy(name="mu_mean")
+max_mean = mean.max(axis=(0,2)).copy(name="mu_max")
 
 min_corr = corr.min().copy(name="corr_min")
 mean_corr = corr.mean().copy(name="corr_mean")
@@ -286,14 +280,14 @@ parameters = cg.parameters
 
 algorithm = GradientDescent(
     cost=cost_reg, parameters=parameters,
-    step_rule=CompositeRule([StepClipping(10.), Adam(0.007)]))
+    step_rule=CompositeRule([StepClipping(10.), Adam(0.001)]))
 
 variables = [cost, min_sigma, max_sigma,
     min_mean, max_mean, mean_mean, mean_sigma, mean_corr,
     mean_data, sigma_data, min_corr, max_corr, cost_reg,
     max_data, min_data, mean_penup]
 
-n_batches = 10
+n_batches = 100
 
 train_monitor = TrainingDataMonitoring(
     variables=variables,
@@ -304,7 +298,7 @@ valid_monitor = DataStreamMonitoring(
      variables,
      valid_stream,
      after_epoch = True,
-     every_n_batches = 15*n_batches,
+     every_n_batches = n_batches,
      prefix="valid")
 
 from blocks.extensions.saveload import Checkpoint
@@ -319,7 +313,7 @@ extensions = extensions=[
     valid_monitor,
     Timing(every_n_batches = n_batches),
     Printing(every_n_batches = n_batches),
-    Write(generator, every_n_batches = 5*n_batches,
+    Write(generator, every_n_batches = n_batches,
         save_name = save_dir + "samples/" + exp_name + ".png"),
     FinishAfter(),
     # .add_condition(["after_batch"], _is_nan),
@@ -329,7 +323,7 @@ extensions = extensions=[
     Plot(save_dir + "pkl/" + exp_name + ".png",
      [['train_nll',
        'valid_nll']],
-     every_n_batches = 10*n_batches)
+     every_n_batches = 5*n_batches)
     ]
 
 main_loop = MainLoop(

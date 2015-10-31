@@ -175,7 +175,7 @@ data_stream = FilterSources(data_stream,
                           sources = ('features',))
 data_stream = Padding(data_stream)
 data_stream = Mapping(data_stream, _transpose)
-data_stream = SegmentSequence(data_stream, add_flag = True)
+data_stream = SegmentSequence(data_stream, add_flag = False)
 data_stream = ForceFloatX(data_stream)
 
 dataset = Handwriting(('valid',))
@@ -230,8 +230,8 @@ states = {name: shared_floatx_zeros((batch_size, hidden_size_recurrent))
           for name in states}
 
 cost_matrix = generator.cost_matrix(x, x_mask, **states)
-cost = cost_matrix.sum()/x_mask.sum()
-cost = cost_matrix.mean()
+cost = cost_matrix*x_mask
+cost = cost.sum(axis = 0).mean()
 cost.name = "nll"
 
 cg = ComputationGraph(cost)
@@ -251,7 +251,7 @@ mean, sigma, corr, weight, penup = emitter.components(readouts)
 # # Out[104]: (6400, 20, 2)
 
 #Hack to include the start_flag
-cost_reg = cost + 0.*start_flag
+cost_reg = cost + 0.#*start_flag
 #for weight in VariableFilter(roles = [WEIGHT])(cg.variables):
 #    cost_reg += 0.01*(weight**2).sum()
 #cost_reg += 0.01*sigma.mean() + 1. #+ 0.0001*(mean**2).mean()
@@ -267,13 +267,13 @@ emit = generator.generate(
 cg = ComputationGraph(cost_reg)
 model = Model(cost_reg)
 
-min_sigma = sigma.min(axis=(0,1)).copy(name="sigma_min")
-mean_sigma = sigma.mean(axis=(0,1)).copy(name="sigma_mean")
-max_sigma = sigma.max(axis=(0,1)).copy(name="sigma_max")
+min_sigma = sigma.min(axis=(0,2)).copy(name="sigma_min")
+mean_sigma = sigma.mean(axis=(0,2)).copy(name="sigma_mean")
+max_sigma = sigma.max(axis=(0,2)).copy(name="sigma_max")
 
-min_mean = mean.min(axis=(0,1)).copy(name="mu_min")
-mean_mean = mean.mean(axis=(0,1)).copy(name="mu_mean")
-max_mean = mean.max(axis=(0,1)).copy(name="mu_max")
+min_mean = mean.min(axis=(0,2)).copy(name="mu_min")
+mean_mean = mean.mean(axis=(0,2)).copy(name="mu_mean")
+max_mean = mean.max(axis=(0,2)).copy(name="mu_max")
 
 min_corr = corr.min().copy(name="corr_min")
 mean_corr = corr.mean().copy(name="corr_mean")
@@ -307,7 +307,7 @@ extra_updates = []
 
 algorithm = GradientDescent(
     cost=cost_reg, parameters=parameters,
-    step_rule=CompositeRule([StepClipping(10.), Adam(0.005)]))
+    step_rule=CompositeRule([StepClipping(10.), Adam(0.001)]))
 algorithm.add_updates(extra_updates)
 
 variables = [cost, min_sigma, max_sigma,
@@ -378,8 +378,6 @@ main_loop = MainLoop(
     data_stream=data_stream,
     algorithm=algorithm,
     extensions = extensions)
-
-ipdb.set_trace()
 main_loop.run()
 
 ipdb.set_trace()
