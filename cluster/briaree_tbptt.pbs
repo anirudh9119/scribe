@@ -1,0 +1,42 @@
+#!/bin/bash
+#PBS -l walltime=47:00:00
+#PBS -l nodes=1:ppn=1
+#PBS -m abe
+#PBS -M rdz.sotelo@gmail.com
+#PBS -t 1-4
+#PBS -q @hades
+#PBS -e /RQexec/sotelo/results/handwriting/$PBS_JOBID.err
+#PBS -o /RQexec/sotelo/results/handwriting/$PBS_JOBID.out
+
+echo "New job started."
+echo $PBS_JOBID
+
+cd $HOME/code
+
+echo "Data path is:"
+export FUEL_DATA_PATH=/lscratch/data
+echo $FUEL_DATA_PATH
+
+FILE=$FUEL_DATA_PATH/handwriting/handwriting.hdf5
+
+if [ -f $FILE ];
+then
+   echo "File $FILE exists."
+else
+   echo "Copying file"
+   mkdir $FUEL_DATA_PATH
+   mkdir $FUEL_DATA_PATH/handwriting
+   cp $SCRATCH/data/handwriting/* $FUEL_DATA_PATH/handwriting/
+fi
+
+echo "Finished copying file in:"
+echo $FILE
+
+export RESULTS_DIR=$SCRATCH/results
+export THEANO_FLAGS=floatX=float32
+
+THEANO_FLAGS=mode=FAST_RUN,device=gpu,floatX=float32 python scribe/scribe_tbptt.py 2> $RESULTS_DIR/handwriting/outfiles/e_$PBS_JOBID.txt 1> $RESULTS_DIR/handwriting/outfiles/o_$PBS_JOBID.txt &
+TRAINER_PID=$!
+
+wait $TRAINER_PID
+echo "Finished program."

@@ -63,8 +63,6 @@ def _transpose(data):
 save_dir = os.environ['RESULTS_DIR']
 save_dir = os.path.join(save_dir,'handwriting/')
 
-exp_name = 'scribe_1'
-
 batch_size = 20
 frame_size = 3
 k = 20
@@ -73,7 +71,8 @@ target_size = frame_size * k
 hidden_size_recurrent = 400
 readout_size =6*k+1
 
-lr = 3e-4
+lr = 10 ** (5*numpy.random.rand() - 8)
+exp_name = 'scribe_tbptt_{}'.format(lr)
 
 dataset = Handwriting(('train',))
 data_stream = DataStream.default_stream(
@@ -142,7 +141,7 @@ states = {name: shared_floatx_zeros((batch_size, hidden_size_recurrent))
           for name in states}
 
 cost_matrix = generator.cost_matrix(x, x_mask, **states)
-cost = cost_matrix.sum(axis = 0).mean() + 0*start_flag
+cost = cost_matrix.sum()/x_mask.sum() + 0*start_flag
 cost.name = "nll"
 
 cg = ComputationGraph(cost)
@@ -164,9 +163,7 @@ emit = generator.generate(
   iterate = True
   )[-2]
 
-#ipdb.set_trace()
-
-#function([x, x_mask], cost)(x_tr[0],x_tr[1])
+function([x, x_mask, start_flag], cost)(x_tr[0],x_tr[1], x_tr[2])
 emit_fn = ComputationGraph(emit).get_theano_function()
 emit_fn()
 
@@ -212,7 +209,7 @@ variables = [cost, min_sigma, max_sigma,
     mean_data, sigma_data, min_corr, max_corr,
     max_data, min_data, mean_penup]
 
-n_batches = 200
+n_batches = 2000
 
 train_monitor = TrainingDataMonitoring(
     variables=variables + [algorithm.total_step_norm,
@@ -228,7 +225,16 @@ valid_monitor = DataStreamMonitoring(
 
 def _is_nan(log):
     #ipdb.set_trace()
-    return math.isnan(log.current_row['train_total_gradient_norm'])
+    try:
+      result = math.isnan(log.current_row['train_total_gradient_norm']) or \
+               math.isnan(log.current_row['train_nll']) or \
+               math.isnan(log.current_row['valid_nll']) or \
+               math.isinf(log.current_row['train_total_gradient_norm']) or \
+               math.isinf(log.current_row['train_nll']) or \
+               math.isinf(log.current_row['valid_nll'])
+      return result
+    except:
+      return False
 
 extensions = extensions=[
     train_monitor,
@@ -239,13 +245,15 @@ extensions = extensions=[
         save_name = save_dir + "samples/" + exp_name + ".png"),
     FinishAfter(before_epoch = False)
     .add_condition(["after_epoch"], _is_nan),
-    ProgressBar(),
+#    ProgressBar(),
     Checkpoint(save_dir + exp_name + ".pkl",after_epoch = True),
     SaveComputationGraph(emit),
     Plot(save_dir + "pkl/" + exp_name + ".png",
      [['train_nll',
        'valid_nll']],
-     every_n_batches = 5*n_batches)
+     every_n_batches = 5*n_batches,
+     email = False),
+    Flush(every_n_batches = n_batches, after_epoch = True)
     ]
 
 main_loop = MainLoop(
@@ -255,5 +263,3 @@ main_loop = MainLoop(
     extensions = extensions)
 
 main_loop.run()
-
-ipdb.set_trace()
