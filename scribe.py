@@ -188,7 +188,7 @@ variables = [cost, min_sigma, max_sigma,
     mean_data, sigma_data, min_corr, max_corr,
     max_data, min_data, mean_penup]
 
-n_batches = 10
+n_batches = 2000
 
 train_monitor = TrainingDataMonitoring(
     variables=variables + [algorithm.total_step_norm,

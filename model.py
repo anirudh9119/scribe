@@ -2,6 +2,10 @@ from blocks.bricks.sequence_generators import AbstractEmitter
 from theano import tensor
 from blocks.bricks import Initializable, Random
 from blocks.bricks.base import application
+from blocks.bricks.recurrent import GatedRecurrent, RecurrentStack
+from blocks.bricks.sequence_generators import SequenceGenerator, Readout
+from blocks.filter import VariableFilter
+from blocks.utils import shared_floatx_zeros
 
 from play.utils import BivariateGMM
 from cle.cle.utils import predict
@@ -20,32 +24,33 @@ class BivariateGMMEmitter(AbstractEmitter, Initializable, Random):
         self.epsilon = epsilon
         super(BivariateGMMEmitter, self).__init__(**kwargs)
 
+    @application(outputs=["mu", "sigma", "corr", "coeff", "penup"])
     def components(self, readouts):
         "Extract parameters of the distribution."
         k = self.k
         readouts = readouts.reshape((-1, self.get_dim('inputs')))
 
         #Reshaped
-        mean = readouts[:, 0:2*k].reshape((-1,2,k))
+        mu = readouts[:, 0:2*k].reshape((-1,2,k))
         sigma = readouts[:, 2*k:4*k].reshape((-1,2,k))
         corr = readouts[:, 4*k:5*k]
         weight = readouts[:, 5*k:6*k]
         penup = readouts[:, 6*k:]
 
-        #mean = mean
+        #mu = mu
         sigma = tensor.exp(sigma) + self.epsilon
         #sigma = tensor.nnet.softplus(sigma) + self.epsilon
         corr = tensor.tanh(corr)
-        weight = tensor.nnet.softmax(weight)
+        weight = tensor.nnet.softmax(weight) + self.epsilon
         penup = tensor.nnet.sigmoid(penup)
 
-        mean.name = "mu"
+        mu.name = "mu"
         sigma.name = "sigma"
         corr.name = "corr"
         weight.name = "coeff"
         penup.name = "penup"
 
-        return mean, sigma, corr, weight, penup
+        return mu, sigma, corr, weight, penup
 
     @application
     def emit(self, readouts):
@@ -58,6 +63,7 @@ class BivariateGMMEmitter(AbstractEmitter, Initializable, Random):
                 pvals=coeff,
                 dtype=coeff.dtype
             ), axis=1)
+
         mu = mu[tensor.arange(mu.shape[0]), :, idx]
         sigma = sigma[tensor.arange(sigma.shape[0]), :, idx]
         corr = corr[tensor.arange(corr.shape[0]), idx]
@@ -100,3 +106,72 @@ class BivariateGMMEmitter(AbstractEmitter, Initializable, Random):
             return 3
 
         return super(BivariateGMMEmitter, self).get_dim(name)
+
+class Scribe(Initializable):
+    """Scribe is here to write for you!
+    You will not need another pencil again.
+    """
+    def __init__(self,hidden_size_recurrent, k, **kwargs):
+        super(Scribe, self).__init__(**kwargs)
+
+        readout_size =6*k+1
+        transition = [GatedRecurrent(dim=hidden_size_recurrent, 
+                      name = "gru_{}".format(i) ) for i in range(3)]
+
+        transition = RecurrentStack( transition,
+                name="transition", skip_connections = True)
+
+        emitter = BivariateGMMEmitter(k = k)
+
+        source_names = [name for name in transition.apply.states 
+                                      if 'states' in name]
+
+        readout = Readout(
+            readout_dim = readout_size,
+            source_names =source_names,
+            emitter=emitter,
+            name="readout")
+
+        self.generator = SequenceGenerator(readout=readout, 
+                                  transition=transition,
+                                  name = "generator")
+
+        self.children = [self.generator]
+
+    def monitoring_vars(self, cg):
+        readout = self.generator.readout
+        readouts = VariableFilter( applications = [readout.readout],
+            name_regex = "output")(cg.variables)[0]
+
+        mean, sigma, corr, weight, penup = readout.emitter.components(readouts)
+
+        min_sigma = sigma.min(axis=(0,2)).copy(name="sigma_min")
+        mean_sigma = sigma.mean(axis=(0,2)).copy(name="sigma_mean")
+        max_sigma = sigma.max(axis=(0,2)).copy(name="sigma_max")
+
+        min_mean = mean.min(axis=(0,2)).copy(name="mu_min")
+        mean_mean = mean.mean(axis=(0,2)).copy(name="mu_mean")
+        max_mean = mean.max(axis=(0,2)).copy(name="mu_max")
+
+        min_corr = corr.min().copy(name="corr_min")
+        mean_corr = corr.mean().copy(name="corr_mean")
+        max_corr = corr.max().copy(name="corr_max")
+
+        mean_penup = penup.mean().copy(name="penup_mean")
+
+        monitoring_vars = [min_sigma, max_sigma,
+            min_mean, max_mean, mean_mean, mean_sigma,
+            mean_corr, min_corr, max_corr, mean_penup]
+
+        return monitoring_vars
+
+
+
+
+
+
+
+
+
+
+
