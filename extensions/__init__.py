@@ -66,3 +66,44 @@ class WriteConditional(SimpleExtension):
         #ipdb.set_trace()
         plot_hw(self.sample_fn(self.phrase_mask, self.phrase)[0], 
           save_name = self.save_name)
+
+from blocks.extensions.training import SharedVariableModifier
+def halver(t, x):
+    return x / 2.
+
+LOADED_FROM = "loaded_from"
+
+from blocks.extensions.saveload import Load
+class LearningRateSchedule(SimpleExtension, Load):
+    """ Control learning rate.
+    """
+    def __init__(self, lr, track_var, path, **kwargs):
+        self.lr = lr
+        self.patience = 5
+        self.counter = 0
+        self.best_value = numpy.inf
+        self.track_var = track_var
+        self.path = path
+        self.load_iteration_state = True
+        self.load_log = True
+        super(LearningRateSchedule, self).__init__(path = self.path, **kwargs)
+
+    def do(self, callback_name, *args):
+        current_value = self.main_loop.log.current_row.get(self.track_var)
+        if current_value is None:
+            return
+
+        if current_value < self.best_value - 1:
+            self.best_value = current_value
+            self.counter = 0
+        else:
+            self.counter += 1
+
+        if self.counter > self.patience:
+            self.lr.set_value(0.5*self.lr.get_value())
+            self.counter = 0
+
+
+            
+
+

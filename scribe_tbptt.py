@@ -1,6 +1,7 @@
 import ipdb
 
 import os
+import sys
 import math
 import numpy
 from numpy import array
@@ -9,13 +10,15 @@ import theano
 from theano import tensor, function
 
 from blocks.algorithms import ( GradientDescent,
-    Adam, StepClipping, CompositeRule)
+    Adam, StepClipping, CompositeRule, RemoveNotFinite)
 
 from blocks.extensions import (FinishAfter, Printing,
-                        SimpleExtension, Timing, ProgressBar)
+                        SimpleExtension, Timing)
 
 from blocks.extensions.monitoring import (TrainingDataMonitoring,
                                     DataStreamMonitoring)
+from blocks.extensions.predicates import OnLogRecord
+from blocks.extensions.training import TrackTheBest
 
 from blocks.graph import ComputationGraph
 from blocks.initialization import IsotropicGaussian, Constant
@@ -29,12 +32,12 @@ from extensions import Write
 
 import numpy as np
 from theano import tensor as T
-from play.utils import BivariateGMM
 from cle.cle.utils import predict
 
 from blocks.roles import WEIGHT
 from blocks.filter import VariableFilter
 from blocks.extensions.saveload import Checkpoint
+from blocks.utils import shared_floatx
 from play.extensions import SaveComputationGraph, Flush
 from play.extensions.plot import Plot
 from play.utils import regex_final_value, _transpose
@@ -49,22 +52,32 @@ floatX = theano.config.floatX
 ###################
 
 save_dir = os.environ['RESULTS_DIR']
-save_dir = os.path.join(save_dir,'handwriting/')
+if 'handwriting' not in save_dir:
+  save_dir = os.path.join(save_dir,'handwriting/')
 
+if len(sys.argv) > 1:
+  num_job = int(sys.argv[1])
+else:
+  num_job = 0
 
-scribe_parameters = ScribeParameters()
-batch_size = scribe_parameters.batch_size
-k = scribe_parameters.k
-hidden_size_recurrent = scribe_parameters.hidden_size_recurrent
+print num_job
+
+exp_params = ScribeParameters(seed = num_job)
+batch_size = exp_params.batch_size
+k = exp_params.k
+hidden_size_recurrent = exp_params.hidden_size_recurrent
 readout_size =6*k+1
 
-lr = scribe_parameters.lr
-exp_name = 'scribe_tbptt_{}'.format(lr)
+lr = exp_params.lr
+exp_name = exp_params.exp_name
+max_size = exp_params.max_size
+seq_size = exp_params.seq_size
+n_batches = exp_params.n_batches
+tbptt_flag = exp_params.tbptt_flag
 
-max_size = 1200
-seq_size = 100
+print "learning rate: ", lr
 
-tbptt_flag = True
+lr = shared_floatx(lr, "learning_rate")
 
 if tbptt_flag:
   train_size = seq_size
@@ -105,6 +118,16 @@ cost.name = "nll"
 cg = ComputationGraph(cost)
 model = Model(cost)
 
+monitoring_vars = scribe.monitoring_vars(cg)
+
+#Regularize variance
+
+reg_cost = cost + 0. #+ 0.01*monitoring_vars[0].mean()
+reg_cost.name = "reg_nll"
+
+cg = ComputationGraph(reg_cost)
+model = Model(reg_cost)
+
 transition_matrix = VariableFilter(
             theano_name_regex = "state_to_state")(cg.parameters)
 for matr in transition_matrix:
@@ -116,9 +139,9 @@ emit = generator.generate(
   iterate = True
   )[-2]
 
-function([x, x_mask, start_flag], cost)(x_tr[0],x_tr[1], x_tr[2])
-emit_fn = ComputationGraph(emit).get_theano_function()
-emit_fn()
+# function([x, x_mask, start_flag], cost)(x_tr[0],x_tr[1], x_tr[2])
+# emit_fn = ComputationGraph(emit).get_theano_function()
+# emit_fn()
 
 parameters = cg.parameters
 
@@ -133,8 +156,8 @@ if tbptt_flag:
       extra_updates.append((var, update))
 
 algorithm = GradientDescent(
-    cost=cost, parameters=parameters,
-    step_rule=CompositeRule([StepClipping(10.), Adam(lr)]))
+    cost=reg_cost, parameters=parameters,
+    step_rule=CompositeRule([StepClipping(10.), Adam(lr), RemoveNotFinite()]))
 algorithm.add_updates(extra_updates)
 
 mean_data = x.mean(axis=(0,1)).copy(name="data_mean")
@@ -142,10 +165,7 @@ sigma_data = x.std(axis=(0,1)).copy(name="data_std")
 max_data = x.max(axis=(0,1)).copy(name="data_max")
 min_data = x.min(axis=(0,1)).copy(name="data_min")
 
-monitoring_vars = scribe.monitoring_vars(cg)
-variables = [cost, mean_data, sigma_data, max_data, min_data] + monitoring_vars
-
-n_batches = 10
+variables = [reg_cost, cost, mean_data, sigma_data, max_data, min_data] + monitoring_vars
 
 train_monitor = TrainingDataMonitoring(
     variables=variables + [algorithm.total_step_norm,
@@ -159,37 +179,37 @@ valid_monitor = DataStreamMonitoring(
      every_n_batches = n_batches,
      prefix="valid")
 
-def _is_nan(log):
-    #ipdb.set_trace()
-    try:
-      result = math.isnan(log.current_row['train_total_gradient_norm']) or \
-               math.isnan(log.current_row['train_nll']) or \
-               math.isnan(log.current_row['valid_nll']) or \
-               math.isinf(log.current_row['train_total_gradient_norm']) or \
-               math.isinf(log.current_row['train_nll']) or \
-               math.isinf(log.current_row['valid_nll'])
-      return result
-    except:
-      return False
+from extensions import LearningRateSchedule
+from utils import _is_nan
 
 extensions = extensions=[
     train_monitor,
     valid_monitor,
+    TrackTheBest('valid_nll', every_n_batches = n_batches),
     Timing(every_n_batches = n_batches),
     Printing(every_n_batches = n_batches),
-    Write(generator, every_n_batches = n_batches,
-        save_name = save_dir + "samples/" + exp_name + ".png"),
-    FinishAfter(before_epoch = False)
+    Write(generator, save_name = save_dir + "samples/" + exp_name + ".png")
+    .add_condition(["after_batch"],
+      predicate=OnLogRecord('valid_nll_best_so_far')),
+    FinishAfter()
     .add_condition(["after_batch"], _is_nan),
-#    ProgressBar(),
-    Checkpoint(save_dir + "pkl/" + exp_name + ".pkl",after_epoch = True),
+    #Checkpoint(save_dir + "pkl/" + exp_name + ".pkl",after_epoch = True),
+    Checkpoint(save_dir + "pkl/best_" + exp_name + ".pkl",
+      before_epoch = True)
+    .add_condition(["after_batch"],
+      predicate=OnLogRecord('valid_nll_best_so_far')),
     SaveComputationGraph(emit),
-    Plot(save_dir + exp_name + ".png",
+    Plot(save_dir + "progress/" + exp_name + ".png",
      [['train_nll',
        'valid_nll']],
      every_n_batches = 5*n_batches,
      email = False),
-    Flush(every_n_batches = n_batches, after_epoch = True)
+    Flush(every_n_batches = n_batches, after_epoch = True),
+    LearningRateSchedule(
+      lr, 
+      'valid_nll',
+      path = save_dir + "pkl/best_" + exp_name + ".pkl",
+      every_n_batches = n_batches)
     ]
 
 main_loop = MainLoop(

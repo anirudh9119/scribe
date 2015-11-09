@@ -71,3 +71,16 @@ if __name__ == '__main__':
 
     plot_hw(X, save_name = 'test.png')
 
+import math
+def _is_nan(log):
+    #ipdb.set_trace()
+    try:
+      result = math.isnan(log.current_row['train_total_gradient_norm']) or \
+               math.isnan(log.current_row['train_nll']) or \
+               math.isnan(log.current_row['valid_nll']) or \
+               math.isinf(log.current_row['train_total_gradient_norm']) or \
+               math.isinf(log.current_row['train_nll']) or \
+               math.isinf(log.current_row['valid_nll'])
+      return result
+    except:
+      return False

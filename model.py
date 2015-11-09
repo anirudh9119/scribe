@@ -6,12 +6,47 @@ from blocks.bricks.recurrent import GatedRecurrent, RecurrentStack
 from blocks.bricks.sequence_generators import SequenceGenerator, Readout
 from blocks.filter import VariableFilter
 from blocks.utils import shared_floatx_zeros
-
-from play.utils import BivariateGMM
+    
 from cle.cle.utils import predict
+from cle.cle.utils.op import logsumexp
 
+import numpy
 import theano
 floatX = theano.config.floatX
+
+def BivariateGMM(y, mu, sigma, corr, coeff, binary, epsilon = 1e-5):
+    """
+    Bivariate gaussian mixture model negative log-likelihood
+    Parameters
+    ----------
+    """
+    n_dim = y.ndim
+    shape_y = y.shape
+    y = y.reshape((-1, shape_y[-1]))
+    y = y.dimshuffle(0, 1, 'x')
+
+    mu_1 = mu[:,0,:]
+    mu_2 = mu[:,1,:]
+
+    sigma_1 = sigma[:,0,:]
+    sigma_2 = sigma[:,1,:]
+
+    binary = (binary+epsilon)*(1-2*epsilon)
+
+    c_b =  tensor.sum( tensor.xlogx.xlogy0(y[:,0,:],  binary) +
+              tensor.xlogx.xlogy0(1 - y[:,0,:], 1 - binary), axis = 1)
+
+    inner1 =  (0.5*tensor.log(1.-corr**2 + epsilon)) + \
+                         tensor.log(sigma_1) + tensor.log(sigma_2) +\
+                         tensor.log(2. * numpy.pi)
+
+    Z = (((y[:,1,:] - mu_1)/sigma_1)**2) + (((y[:,2,:] - mu_2) / sigma_2)**2) - \
+        (2. * (corr * (y[:,1,:] - mu_1)*(y[:,2,:] - mu_2)) / (sigma_1 * sigma_2))
+    inner2 = 0.5 * (1. / (1. - corr**2 + epsilon))
+    cost = - (inner1 + (inner2 * Z))
+
+    nll = -logsumexp(tensor.log(coeff) + cost, axis=1) - c_b
+    return nll.reshape(shape_y[:-1], ndim = n_dim-1)
 
 class BivariateGMMEmitter(AbstractEmitter, Initializable, Random):
     """A mixture of gaussians emitter for x,y and logistic for pen-up/down.
@@ -38,8 +73,8 @@ class BivariateGMMEmitter(AbstractEmitter, Initializable, Random):
         penup = readouts[:, 6*k:]
 
         #mu = mu
-        sigma = tensor.exp(sigma) + self.epsilon
-        #sigma = tensor.nnet.softplus(sigma) + self.epsilon
+        #sigma = tensor.exp(sigma) + self.epsilon
+        sigma = tensor.nnet.softplus(sigma) + self.epsilon
         corr = tensor.tanh(corr)
         weight = tensor.nnet.softmax(weight) + self.epsilon
         penup = tensor.nnet.sigmoid(penup)
@@ -159,19 +194,9 @@ class Scribe(Initializable):
 
         mean_penup = penup.mean().copy(name="penup_mean")
 
-        monitoring_vars = [min_sigma, max_sigma,
-            min_mean, max_mean, mean_mean, mean_sigma,
+        monitoring_vars = [mean_sigma, min_sigma,
+            min_mean, max_mean, mean_mean, max_sigma,
             mean_corr, min_corr, max_corr, mean_penup]
 
         return monitoring_vars
-
-
-
-
-
-
-
-
-
-
 

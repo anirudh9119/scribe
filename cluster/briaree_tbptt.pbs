@@ -5,12 +5,20 @@
 #PBS -M rdz.sotelo@gmail.com
 #PBS -t 1-10
 #PBS -q @hades
-#PBS -e /RQexec/sotelo/results/handwriting/$PBS_JOBID.err
-#PBS -o /RQexec/sotelo/results/handwriting/$PBS_JOBID.out
+#PBS -e /RQexec/sotelo/results/handwriting/cluster_files/$PBS_JOBID.err
+#PBS -o /RQexec/sotelo/results/handwriting/cluster_files/$PBS_JOBID.out
+#PBS -N tbptt_cost_var
 
 echo "New job started."
 echo $PBS_JOBID
 echo $PBS_ARRAYID
+
+echo "New job started."
+# Get the port out of the job id.
+JOB_ID=$(cut -f1 -d"[" <<< $PBS_JOBID)
+JOB_ID=$(cut -f1 -d"." <<< $JOB_ID)
+
+JOB_NAME=$(cut -f1 -d"-" <<< $PBS_JOBNAME)
 
 cd $HOME/code
 
@@ -33,10 +41,15 @@ fi
 echo "Finished copying file in:"
 echo $FILE
 
-export RESULTS_DIR=$SCRATCH/results
-export THEANO_FLAGS=floatX=float32
+# Change following line for name.
+export RESULTS_DIR=$SCRATCH/results/handwriting/$JOB_ID\_$JOB_NAME/
+mkdir $RESULTS_DIR
+mkdir $RESULTS_DIR/outfiles
+mkdir $RESULTS_DIR/pkl
+mkdir $RESULTS_DIR/samples
+mkdir $RESULTS_DIR/progress
 
-THEANO_FLAGS=mode=FAST_RUN,device=gpu,floatX=float32 python scribe/scribe_tbptt.py 2> $RESULTS_DIR/handwriting/outfiles/e_$PBS_JOBID.txt 1> $RESULTS_DIR/handwriting/outfiles/o_$PBS_JOBID.txt &
+THEANO_FLAGS=mode=FAST_RUN,device=gpu,floatX=float32 python scribe/scribe_tbptt.py $PBS_ARRAYID 2> $RESULTS_DIR/outfiles/e_$PBS_ARRAYID.txt 1> $RESULTS_DIR/outfiles/o_$PBS_ARRAYID.txt &
 TRAINER_PID=$!
 
 wait $TRAINER_PID

@@ -3,7 +3,7 @@ import ipdb
 
 from fuel import config
 from fuel.datasets import H5PYDataset
-from fuel.schemes import SequentialScheme
+from fuel.schemes import ShuffledScheme
 from fuel.streams import DataStream
 from fuel.transformers import Mapping, Padding, FilterSources, ForceFloatX
 
@@ -25,7 +25,7 @@ def stream_handwriting(which_sets , batch_size,
 					   seq_size, tbptt = True):
 	dataset = Handwriting(which_sets)
 	data_stream = DataStream.default_stream(
-	            dataset, iteration_scheme=SequentialScheme(
+	            dataset, iteration_scheme=ShuffledScheme(
 	            batch_size*(dataset.num_examples/batch_size),
 	            batch_size))
 	data_stream = FilterSources(data_stream, 
