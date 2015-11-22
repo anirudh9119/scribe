@@ -38,7 +38,9 @@ from blocks.roles import WEIGHT
 from blocks.filter import VariableFilter
 from blocks.extensions.saveload import Checkpoint
 from blocks.utils import shared_floatx
-from play.extensions import SaveComputationGraph, Flush
+from play.extensions import (
+  SaveComputationGraph, Flush, TimedFinish, LearningRateSchedule)
+
 from play.extensions.plot import Plot
 from play.utils import regex_final_value, _transpose
 
@@ -139,10 +141,6 @@ emit = generator.generate(
   iterate = True
   )[-2]
 
-# function([x, x_mask, start_flag], cost)(x_tr[0],x_tr[1], x_tr[2])
-# emit_fn = ComputationGraph(emit).get_theano_function()
-# emit_fn()
-
 parameters = cg.parameters
 
 # Update the initial values with the last state
@@ -165,7 +163,7 @@ sigma_data = x.std(axis=(0,1)).copy(name="data_std")
 max_data = x.max(axis=(0,1)).copy(name="data_max")
 min_data = x.min(axis=(0,1)).copy(name="data_min")
 
-variables = [reg_cost, cost, mean_data, sigma_data, max_data, min_data] + monitoring_vars
+variables = [lr, reg_cost, cost, mean_data, sigma_data, max_data, min_data] + monitoring_vars
 
 train_monitor = TrainingDataMonitoring(
     variables=variables + [algorithm.total_step_norm,
@@ -179,13 +177,14 @@ valid_monitor = DataStreamMonitoring(
      every_n_batches = n_batches,
      prefix="valid")
 
-from extensions import LearningRateSchedule
 from utils import _is_nan
 
 extensions = extensions=[
     train_monitor,
     valid_monitor,
-    TrackTheBest('valid_nll', every_n_batches = n_batches),
+    TrackTheBest('valid_nll',
+      every_n_batches = n_batches,
+      before_first_epoch = True),
     Timing(every_n_batches = n_batches),
     Printing(every_n_batches = n_batches),
     Write(generator, save_name = save_dir + "samples/" + exp_name + ".png")
@@ -194,8 +193,7 @@ extensions = extensions=[
     FinishAfter()
     .add_condition(["after_batch"], _is_nan),
     #Checkpoint(save_dir + "pkl/" + exp_name + ".pkl",after_epoch = True),
-    Checkpoint(save_dir + "pkl/best_" + exp_name + ".pkl",
-      before_epoch = True)
+    Checkpoint(save_dir + "pkl/best_" + exp_name + ".pkl")
     .add_condition(["after_batch"],
       predicate=OnLogRecord('valid_nll_best_so_far')),
     SaveComputationGraph(emit),
@@ -208,7 +206,7 @@ extensions = extensions=[
     LearningRateSchedule(
       lr, 
       'valid_nll',
-      path = save_dir + "pkl/best_" + exp_name + ".pkl",
+      states = states.values(),
       every_n_batches = n_batches)
     ]
 

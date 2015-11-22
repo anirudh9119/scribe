@@ -7,18 +7,17 @@
 #PBS -q @hades
 #PBS -e /RQexec/sotelo/results/handwriting/cluster_files/$PBS_JOBID.err
 #PBS -o /RQexec/sotelo/results/handwriting/cluster_files/$PBS_JOBID.out
-#PBS -N tbptt_cost_var
 
 echo "New job started."
 echo $PBS_JOBID
 echo $PBS_ARRAYID
 
+NOTES="Baseline with improved extension. (NaN)"
+
 echo "New job started."
 # Get the port out of the job id.
 JOB_ID=$(cut -f1 -d"[" <<< $PBS_JOBID)
 JOB_ID=$(cut -f1 -d"." <<< $JOB_ID)
-
-JOB_NAME=$(cut -f1 -d"-" <<< $PBS_JOBNAME)
 
 cd $HOME/code
 
@@ -42,12 +41,16 @@ echo "Finished copying file in:"
 echo $FILE
 
 # Change following line for name.
-export RESULTS_DIR=$SCRATCH/results/handwriting/$JOB_ID\_$JOB_NAME/
+export RESULTS_DIR=$SCRATCH/results/handwriting/$JOB_ID/
 mkdir $RESULTS_DIR
 mkdir $RESULTS_DIR/outfiles
 mkdir $RESULTS_DIR/pkl
 mkdir $RESULTS_DIR/samples
 mkdir $RESULTS_DIR/progress
+
+cp scribe/config.py $RESULTS_DIR
+cp scribe/scribe_tbptt.py $RESULTS_DIR/model.py
+echo $NOTES > $RESULTS_DIR/notes.txt
 
 THEANO_FLAGS=mode=FAST_RUN,device=gpu,floatX=float32 python scribe/scribe_tbptt.py $PBS_ARRAYID 2> $RESULTS_DIR/outfiles/e_$PBS_ARRAYID.txt 1> $RESULTS_DIR/outfiles/o_$PBS_ARRAYID.txt &
 TRAINER_PID=$!
