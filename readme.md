@@ -9,7 +9,6 @@ Requires:
  * Blocks
  * Fuel
 
-This is work in progress...
 
 Also look:
  * https://github.com/udibr/sketch
